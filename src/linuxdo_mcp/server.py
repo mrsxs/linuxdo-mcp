@@ -105,15 +105,32 @@ def _search(query, page, pages):
             "more_results": gsr.get("more_full_page_results", False), "results": results}
 
 
-def _topic(topic_id, posts):
+def _topic(topic_id, posts, start):
     j = _fetch(f"/t/{topic_id}.json")
-    ps = (j.get("post_stream") or {}).get("posts", [])[:posts]
+    stream = (j.get("post_stream") or {}).get("stream", [])
+    have = {p["id"]: p for p in (j.get("post_stream") or {}).get("posts", [])}
+    # 从第 start 楼(1-based)起取 posts 个楼层；Discourse 首批只回前 ~20 楼，
+    # 其余按 stream 里的 id 分批补抓（每批 20 个）。
+    want_ids = stream[max(start - 1, 0):max(start - 1, 0) + posts]
+    missing = [pid for pid in want_ids if pid not in have]
+    for i in range(0, len(missing), 20):
+        chunk = missing[i:i + 20]
+        qs = "&".join(f"post_ids[]={pid}" for pid in chunk)
+        extra = _fetch(f"/t/{topic_id}/posts.json?{qs}")
+        for p in (extra.get("post_stream") or {}).get("posts", []):
+            have[p["id"]] = p
+        if i + 20 < len(missing):
+            time.sleep(0.4)
+    ordered = [have[pid] for pid in want_ids if pid in have]
     return {
         "id": j.get("id"),
         "title": j.get("title"),
         "category_id": j.get("category_id"),
         "tags": [t.get("name") if isinstance(t, dict) else t for t in (j.get("tags") or [])],
         "posts_count": j.get("posts_count"),
+        "total_posts": len(stream),
+        "start": start,
+        "returned": len(ordered),
         "views": j.get("views"),
         "like_count": j.get("like_count"),
         "url": _topic_url(j.get("slug"), j.get("id")),
@@ -122,7 +139,7 @@ def _topic(topic_id, posts):
             "username": p.get("username"),
             "created_at": p.get("created_at"),
             "content": _strip_html(p.get("cooked")),
-        } for p in ps],
+        } for p in ordered],
     }
 
 
@@ -241,11 +258,13 @@ def _format_search(query, page, pages):
     return "\n".join(lines)
 
 
-def _format_topic(topic_id, posts):
-    d = _topic(topic_id, posts)
+def _format_topic(topic_id, posts, start):
+    d = _topic(topic_id, posts, start)
     head = (f'> **{d["title"]}**\n'
             f'> 📍 {d["url"]} ｜ {d.get("views", 0)}浏览 · '
-            f'{d.get("like_count", 0)}赞 · {d.get("posts_count", 0)}回复\n')
+            f'{d.get("like_count", 0)}赞 · {d.get("posts_count", 0)}回复'
+            f'（共 {d.get("total_posts", 0)} 楼，本次 {d.get("start", 1)}–'
+            f'{d.get("start", 1) + d.get("returned", 0) - 1}）\n')
     rows = ["| 楼层 | 用户 | 原话 |", "|---|---|---|"]
     for p in d["posts"]:
         who = f'{p["username"]}（楼主）' if p["floor"] == 1 else p["username"]
@@ -267,9 +286,10 @@ def search(query: str, page: int = 1, pages: int = 1) -> dict:
 
 
 @mcp.tool()
-def get_topic(topic_id: int, posts: int = 5) -> dict:
-    """读取指定话题的详情与前 N 个楼层正文（含楼主与回复）。"""
-    return _topic(topic_id, posts)
+def get_topic(topic_id: int, posts: int = 20, start: int = 1) -> dict:
+    """读取指定话题的详情与楼层正文。posts=返回楼层数，start=起始楼层(1-based，用于翻页，
+    如 start=21 取第 21 楼起)。返回含 total_posts(总楼数)。"""
+    return _topic(topic_id, posts, start)
 
 
 @mcp.tool()
@@ -279,9 +299,10 @@ def format_search(query: str, page: int = 1, pages: int = 1) -> str:
 
 
 @mcp.tool()
-def format_topic(topic_id: int, posts: int = 20) -> str:
-    """同 get_topic，但直接返回拼好的 Markdown（出处头 + 逐楼表格），客户端可原样展示。"""
-    return _format_topic(topic_id, posts)
+def format_topic(topic_id: int, posts: int = 20, start: int = 1) -> str:
+    """同 get_topic，但直接返回拼好的 Markdown（出处头 + 逐楼表格），客户端可原样展示。
+    posts=楼层数，start=起始楼层(1-based，翻页用，如 start=21)。"""
+    return _format_topic(topic_id, posts, start)
 
 
 @mcp.tool()
