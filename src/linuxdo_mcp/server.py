@@ -160,6 +160,7 @@ def _category_topics(category_id, page):
     cat = next((c for c in _categories() if c["id"] == category_id), None)
     if not cat:
         raise RuntimeError(f"找不到类别 id={category_id}，请先用 list_categories 查看可用类别。")
+    idx = _category_index()
     tl = _fetch(f"/c/{cat['slug']}/{category_id}.json?page={page}").get("topic_list") or {}
     topics = tl.get("topics", [])
     return {
@@ -169,15 +170,53 @@ def _category_topics(category_id, page):
         "page": page,
         "returned": len(topics),
         "more": bool(tl.get("more_topics_url")),
-        "topics": [_topic_brief(t) for t in topics],
+        "topics": [_topic_brief(t, idx) for t in topics],
     }
 
 
-def _topic_brief(t):
+_SITE_CACHE = {"ts": 0.0, "cats": {}}
+_LV_RE = re.compile(r"^(.*?)[,，]\s*Lv\s*([0-3])\s*$", re.I)
+
+
+def _split_level(name):
+    """从分类名解析等级：'开发调优, Lv1' -> ('开发调优', 1)；无后缀则 (name, None)。
+    linux.do 不暴露 minimum_required_trust_level，等级信息写在子板名的 ', LvN' 后缀里。"""
+    m = _LV_RE.match(name or "")
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    return (name or "").strip() or None, None
+
+
+def _category_index():
+    """{category_id: {"name"(去掉 LvN 后缀), "trust_level"(int 或 None)}}，含子分类；
+    缓存 5 分钟。取自 /site.json（覆盖父板+子板）；失败时退回旧缓存，不阻断列表请求。"""
+    now = time.time()
+    if _SITE_CACHE["cats"] and now - _SITE_CACHE["ts"] < 300:
+        return _SITE_CACHE["cats"]
+    try:
+        cats = _fetch("/site.json").get("categories", [])
+    except Exception:
+        return _SITE_CACHE["cats"]
+    idx = {}
+    for c in cats:
+        base, lv = _split_level(c.get("name"))
+        if lv is None:
+            lv = c.get("minimum_required_trust_level")
+        idx[c.get("id")] = {"name": base, "trust_level": lv}
+    _SITE_CACHE.update(ts=now, cats=idx)
+    return idx
+
+
+def _topic_brief(t, idx=None):
+    idx = idx if idx is not None else {}
+    cid = t.get("category_id")
+    cat = idx.get(cid) or {}
     return {
         "id": t.get("id"),
         "title": t.get("title"),
-        "category_id": t.get("category_id"),
+        "category_id": cid,
+        "category": cat.get("name"),
+        "min_trust_level": cat.get("trust_level"),
         "posts_count": t.get("posts_count"),
         "views": t.get("views"),
         "like_count": t.get("like_count"),
@@ -187,11 +226,12 @@ def _topic_brief(t):
 
 
 def _topics_page(path, extra):
+    idx = _category_index()
     tl = _fetch(path).get("topic_list") or {}
     topics = tl.get("topics", [])
     return {**extra, "returned": len(topics),
             "more": bool(tl.get("more_topics_url")),
-            "topics": [_topic_brief(t) for t in topics]}
+            "topics": [_topic_brief(t, idx) for t in topics]}
 
 
 def _tags():
@@ -283,7 +323,8 @@ def whoami() -> dict:
 @mcp.tool()
 def search(query: str, page: int = 1, pages: int = 1) -> dict:
     """全量搜索 linux.do。query 支持 Discourse 高级语法（order:latest、#分类、@用户、
-    tags:标签、after:2025-01-01、in:title 等）。pages 为连续抓取的页数（每页约 50 条）。"""
+    tags:标签、after:2025-01-01、in:title 等）。pages 为连续抓取的页数（每页约 50 条）。
+    展示约定：Markdown 表格或列表，标题完整勿截断，纯文字勿用 emoji（易乱码）。"""
     return _search(query, page, pages)
 
 
@@ -317,7 +358,9 @@ def list_categories() -> dict:
 @mcp.tool()
 def category_topics(category_id: int, page: int = 1) -> dict:
     """列出指定类别下的话题（每页约 30 条）。返回含该类别总话题数 topic_count、
-    本页话题列表与是否有下一页。category_id 用 list_categories 查询。"""
+    本页话题列表与是否有下一页。category_id 用 list_categories 查询。每条话题已含
+    category、min_trust_level。展示约定同 latest_topics（Markdown 表格、完整标题、
+    纯文字表头禁用 emoji）。"""
     return _category_topics(category_id, page)
 
 
@@ -330,7 +373,9 @@ def list_tags() -> dict:
 
 @mcp.tool()
 def tag_topics(tag: str, page: int = 1) -> dict:
-    """列出指定标签下的话题（每页约 30 条）。tag 用标签名（如「人工智能」）。"""
+    """列出指定标签下的话题（每页约 30 条）。tag 用标签名（如「人工智能」）。每条话题
+    已含 category、min_trust_level。展示约定同 latest_topics（Markdown 表格、完整
+    标题、纯文字表头禁用 emoji）。"""
     return _tag_topics(tag, page)
 
 
@@ -342,13 +387,20 @@ def user_info(username: str) -> dict:
 
 @mcp.tool()
 def latest_topics(page: int = 1) -> dict:
-    """获取首页「最新」话题列表（每页约 30 条）。"""
+    """获取首页「最新」话题列表（每页约 30 条）。每条已含 category(分类名)、
+    min_trust_level(最低等级要求，null=无限制)，无需再逐条 get_topic 查分类。
+
+    展示约定：用 Markdown 表格，列依次为 标题(完整勿截断) | 分类 | 等级 | 回复 |
+    点赞 | 链接；表头与单元格一律纯文字，禁用 emoji（多字节 emoji 在生成时可能
+    碎成「����」乱码）。等级按 min_trust_level 显示「Lv0/1/2/3」，null 显示「—」。"""
     return _topics_page(f"/latest.json?page={page}", {"page": page})
 
 
 @mcp.tool()
 def top_topics(period: str = "weekly", page: int = 1) -> dict:
-    """获取「热门」话题列表。period 取 daily/weekly/monthly/quarterly/yearly/all。"""
+    """获取「热门」话题列表。period 取 daily/weekly/monthly/quarterly/yearly/all。
+    每条已含 category、min_trust_level。展示约定同 latest_topics（Markdown 表格、
+    完整标题、纯文字表头禁用 emoji）。"""
     return _top(period, page)
 
 
