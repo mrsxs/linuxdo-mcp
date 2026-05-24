@@ -151,6 +151,7 @@ def _categories():
         "name": c.get("name"),
         "topic_count": c.get("topic_count"),
         "post_count": c.get("post_count"),
+        "minimum_required_trust_level": c.get("minimum_required_trust_level"),
         "description": _strip_html(c.get("description_text") or c.get("description")),
     } for c in cats]
 
@@ -176,6 +177,7 @@ def _topic_brief(t):
     return {
         "id": t.get("id"),
         "title": t.get("title"),
+        "category_id": t.get("category_id"),
         "posts_count": t.get("posts_count"),
         "views": t.get("views"),
         "like_count": t.get("like_count"),
