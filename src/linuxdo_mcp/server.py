@@ -72,6 +72,54 @@ def _strip_html(s):
     return html.unescape(re.sub(r"<[^>]+>", "", s or "")).strip()
 
 
+def _html_to_text(s):
+    """把 Discourse 渲染后的 cooked HTML 转成可读文本：
+    保留段落换行、把代码块转成 ``` 围栏、列表转 - 项、数学转 $..$/$$..$$、加粗转 **。"""
+    if not s:
+        return ""
+    t = s
+
+    def _code(m):
+        lang = (m.group(1) or "").strip().lower()
+        if lang in ("plaintext", "text", "auto", "nohighlight", "none"):
+            lang = ""
+        body = html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip("\n")
+        return f"\n\n```{lang}\n{body}\n```\n\n"
+
+    # 代码块：<pre><code class="... lang-xxx ...">...</code></pre>
+    t = re.sub(
+        r'<pre><code(?:\s+class="[^"]*?lang-([\w+#.-]+)[^"]*")?[^>]*>(.*?)</code></pre>',
+        _code, t, flags=re.S)
+    # 行内代码
+    t = re.sub(r"<code>(.*?)</code>",
+               lambda m: "`" + html.unescape(re.sub(r"<[^>]+>", "", m.group(1))) + "`",
+               t, flags=re.S)
+    # 数学：块级 $$..$$、行内 $..$
+    t = re.sub(r'<div class="math">(.*?)</div>',
+               lambda m: "\n\n$$" + m.group(1).strip() + "$$\n\n", t, flags=re.S)
+    t = re.sub(r'<span class="math">(.*?)</span>',
+               lambda m: "$" + m.group(1).strip() + "$", t, flags=re.S)
+    # 加粗
+    t = re.sub(r"</?(?:strong|b)>", "**", t)
+    # 列表
+    t = re.sub(r"<li>", "\n- ", t)
+    t = re.sub(r"</li>", "", t)
+    t = re.sub(r"</?[uo]l>", "\n", t)
+    # 段落 / 换行 / 标题 / 引用 / 块边界
+    t = re.sub(r"<br\s*/?>", "\n", t)
+    t = re.sub(r"</p>", "\n\n", t)
+    t = re.sub(r"</h[1-6]>", "\n\n", t)
+    t = re.sub(r"</blockquote>", "\n", t)
+    t = re.sub(r"</div>", "\n", t)
+    # 删除其余标签（如 <a>、<p>、<span> 等，保留其内部文本）
+    t = re.sub(r"<[^>]+>", "", t)
+    t = html.unescape(t)
+    # 收敛空白
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 def _topic_url(slug, tid):
     return f"{BASE}/t/{slug or 'topic'}/{tid}"
 
@@ -166,7 +214,7 @@ def _topic(topic_id, posts, start):
             "floor": p.get("post_number"),
             "username": p.get("username"),
             "created_at": p.get("created_at"),
-            "content": _strip_html(p.get("cooked")),
+            "content": _html_to_text(p.get("cooked")),
         } for p in ordered],
     }
 
@@ -311,10 +359,6 @@ def _user_actions(username, limit):
     } for a in acts]}
 
 
-def _md_cell(s):
-    return (s or "").replace("|", "\\|").replace("\n", "<br>").strip()
-
-
 def _format_search(query, page, pages):
     d = _search(query, page, pages)
     more = "（还有更多结果）" if d["more_results"] else ""
@@ -330,16 +374,19 @@ def _format_search(query, page, pages):
 
 def _format_topic(topic_id, posts, start):
     d = _topic(topic_id, posts, start)
-    head = (f'> **{d["title"]}**\n'
-            f'> 📍 {d["url"]} ｜ {d.get("views", 0)}浏览 · '
-            f'{d.get("like_count", 0)}赞 · {d.get("posts_count", 0)}回复'
-            f'（共 {d.get("total_posts", 0)} 楼，本次 {d.get("start", 1)}–'
-            f'{d.get("start", 1) + d.get("returned", 0) - 1}）\n')
-    rows = ["| 楼层 | 用户 | 原话 |", "|---|---|---|"]
+    end = d.get("start", 1) + d.get("returned", 0) - 1
+    out = [
+        f'> **{d["title"]}**',
+        f'> 📍 {d["url"]} ｜ {d.get("views", 0)}浏览 · {d.get("like_count", 0)}赞 · '
+        f'{d.get("posts_count", 0)}回复（共 {d.get("total_posts", 0)} 楼，'
+        f'本次 {d.get("start", 1)}–{end}）',
+    ]
     for p in d["posts"]:
-        who = f'{p["username"]}（楼主）' if p["floor"] == 1 else p["username"]
-        rows.append(f'| #{p["floor"]} | {who} | {_md_cell(p["content"])} |')
-    return head + "\n" + "\n".join(rows)
+        who = f'@{p["username"]}（楼主）' if p["floor"] == 1 else f'@{p["username"]}'
+        out += ["", f'## #{p["floor"]} · {who}', "", p["content"], "", "---"]
+    if out and out[-1] == "---":
+        out.pop()
+    return "\n".join(out).rstrip()
 
 
 @mcp.tool()
