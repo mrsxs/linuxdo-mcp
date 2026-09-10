@@ -5,8 +5,9 @@ description = "MCP server for searching and reading linux.do (Discourse)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.2.0,<3",
     "curl_cffi>=0.7",
+    "pycookiecheat>=0.8",
 ]
 
 [project.scripts]

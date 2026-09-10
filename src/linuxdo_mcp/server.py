@@ -1,7 +1,8 @@
 """linux.do (Discourse) MCP 服务器。
 
 通过 curl_cffi 模拟 Chrome TLS 指纹绕过 Cloudflare，用 _t cookie 认证。
-认证：环境变量 LINUXDO_COOKIE = "_t=你的token值"（每个用户用自己的）。
+认证：默认自动从本机浏览器读取 linux.do 的 _t cookie（见 cookies.py），
+也可用环境变量 LINUXDO_COOKIE = "_t=你的token值" 显式指定。
 
 暴露工具：whoami / search / get_topic。
 """
@@ -13,28 +14,31 @@ import time
 import urllib.parse
 
 from curl_cffi import requests as creq
-from mcp.server.fastmcp import FastMCP
+
+try:  # mcp >= 2：FastMCP 更名为 MCPServer
+    from mcp.server.mcpserver import MCPServer as _Server
+except ImportError:  # mcp < 2
+    from mcp.server.fastmcp import FastMCP as _Server
+
+from . import cookies
 
 BASE = "https://linux.do"
 IMPERSONATE = os.environ.get("LINUXDO_IMPERSONATE", "chrome")
 
-mcp = FastMCP("linuxdo")
+mcp = _Server("linuxdo")
 
 
-def _cookie_header():
-    raw = os.environ.get("LINUXDO_COOKIE", "").strip()
-    if not raw:
-        raise RuntimeError("未设置 LINUXDO_COOKIE 环境变量（值形如 _t=xxxxx）。")
-    return raw if "=" in raw else f"_t={raw}"
+def _cookie_header(force=False):
+    return cookies.get_cookie(force=force)
 
 
 def _blocked(body):
     return "Just a moment" in body[:600] or "challenge-platform" in body[:2000]
 
 
-def _fetch(path):
+def _fetch(path, _refreshed=False):
     url = path if path.startswith("http") else BASE + path
-    headers = {"Accept": "application/json", "Cookie": _cookie_header()}
+    headers = {"Accept": "application/json", "Cookie": _cookie_header(force=_refreshed)}
     last = ""
     for attempt in range(3):
         try:
@@ -49,7 +53,13 @@ def _fetch(path):
             time.sleep(0.8 * (attempt + 1))
             continue
         if r.status_code in (401, 403):
-            raise RuntimeError(f"认证失败({r.status_code})：cookie 可能已过期，请重新导出 _t。")
+            if not _refreshed:  # cookie 可能过期，丢掉缓存重新从浏览器取一次
+                cookies.clear_cache()
+                return _fetch(path, _refreshed=True)
+            raise RuntimeError(
+                f"认证失败({r.status_code})：cookie 已失效。"
+                "请在浏览器里重新登录 linux.do，或更新 LINUXDO_COOKIE。"
+            )
         if r.status_code == 429:
             raise RuntimeError("被限流(429)：请降低频率，稍后重试。")
         if r.status_code != 200 or not body.lstrip().startswith(("{", "[")):
@@ -64,6 +74,23 @@ def _strip_html(s):
 
 def _topic_url(slug, tid):
     return f"{BASE}/t/{slug or 'topic'}/{tid}"
+
+
+def _as_topic_id(topic):
+    """接受话题 id（int/数字串）或 linux.do 话题 URL，返回整数 id。
+    URL 形如 https://linux.do/t/<slug>/<id>[/<楼层>]，取路径里 /t/ 后的数字段。"""
+    if isinstance(topic, int):
+        return topic
+    t = str(topic).strip()
+    if t.isdigit():
+        return int(t)
+    m = re.search(r"/t/(?:[^/]+/)?(\d+)", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\d+", t)
+    if m:
+        return int(m.group(0))
+    raise RuntimeError(f"无法从 {topic!r} 解析出话题 id（给数字 id 或话题 URL）。")
 
 
 def _whoami():
@@ -106,6 +133,7 @@ def _search(query, page, pages):
 
 
 def _topic(topic_id, posts, start):
+    topic_id = _as_topic_id(topic_id)
     j = _fetch(f"/t/{topic_id}.json")
     stream = (j.get("post_stream") or {}).get("stream", [])
     have = {p["id"]: p for p in (j.get("post_stream") or {}).get("posts", [])}
@@ -329,9 +357,10 @@ def search(query: str, page: int = 1, pages: int = 1) -> dict:
 
 
 @mcp.tool()
-def get_topic(topic_id: int, posts: int = 20, start: int = 1) -> dict:
-    """读取指定话题的详情与楼层正文。posts=返回楼层数，start=起始楼层(1-based，用于翻页，
-    如 start=21 取第 21 楼起)。返回含 total_posts(总楼数)。"""
+def get_topic(topic_id: int | str, posts: int = 20, start: int = 1) -> dict:
+    """读取指定话题的详情与楼层正文。topic_id 可传数字 id，也可直接传 linux.do 话题
+    URL（如 https://linux.do/t/xxx/2885565/1，会自动取出 id）。posts=返回楼层数，
+    start=起始楼层(1-based，用于翻页，如 start=21 取第 21 楼起)。返回含 total_posts(总楼数)。"""
     return _topic(topic_id, posts, start)
 
 
@@ -342,9 +371,10 @@ def format_search(query: str, page: int = 1, pages: int = 1) -> str:
 
 
 @mcp.tool()
-def format_topic(topic_id: int, posts: int = 20, start: int = 1) -> str:
+def format_topic(topic_id: int | str, posts: int = 20, start: int = 1) -> str:
     """同 get_topic，但直接返回拼好的 Markdown（出处头 + 逐楼表格），客户端可原样展示。
-    posts=楼层数，start=起始楼层(1-based，翻页用，如 start=21)。"""
+    topic_id 可传数字 id 或 linux.do 话题 URL（自动解析）。posts=楼层数，
+    start=起始楼层(1-based，翻页用，如 start=21)。"""
     return _format_topic(topic_id, posts, start)
 
 

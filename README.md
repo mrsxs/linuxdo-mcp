@@ -37,32 +37,56 @@
 | `format_topic(topic_id, posts=20)` | Markdown | 同 get_topic,直接返回成品 Markdown(出处头+逐楼表格) |
 
 - `format_*` 工具返回拼好的 Markdown 字符串,客户端可原样展示;其余返回结构化 JSON。
+- `get_topic` / `format_topic` 的 `topic_id` 可直接传话题 URL（如 `https://linux.do/t/xxx/2885565`），自动解析出 id。
 - 搜索高级语法:`order:latest`、`#分类`、`@用户`、`tags:标签`、`after:2025-01-01`、`in:title` 等。
 
 ## 前置
 
 - 安装 [uv](https://docs.astral.sh/uv/)(提供 `uvx`)。
-- 拿到自己的 cookie:浏览器登录 linux.do → F12 → Application → Cookies → `https://linux.do` → 复制 `_t` 的 Value。
+- 用 Chrome/Chromium/Brave/Firefox 登录 linux.do 即可,cookie 默认自动读取,无需手工导出。
   只需 `_t`,**不需要** `cf_clearance`。
+- 若不想让本工具读浏览器,可手工导出:F12 → Application → Cookies → `https://linux.do` → 复制 `_t` 的 Value,
+  填进下面的 `LINUXDO_COOKIE`。
 
 ## 配置(复制到你的 MCP 客户端)
 
-无需下载代码,`uvx` 会自动从仓库拉取并运行。把下面这段加进客户端的 MCP 配置,
-填上**你自己的** `_t`:
+无需下载代码,`uvx` 会自动从仓库拉取并运行。把下面这段加进客户端的 MCP 配置即可:
 
 ```json
 {
   "mcpServers": {
     "linuxdo": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/mrsxs/linuxdo-mcp", "linuxdo-mcp"],
-      "env": {
-        "LINUXDO_COOKIE": "_t=你的token值"
-      }
+      "args": ["--from", "git+https://github.com/mrsxs/linuxdo-mcp", "linuxdo-mcp"]
     }
   }
 }
 ```
+
+cookie 按以下顺序获取,通常什么都不用配:
+
+1. 环境变量 `LINUXDO_COOKIE`(想手工指定时用,优先级最高);
+2. 缓存文件 `~/.cache/linuxdo-mcp/cookie.json`(权限 600,默认 6 小时);
+3. 本机浏览器的 cookie 库。各平台差别:
+
+   | 平台 | Chrome/Chromium/Brave | Firefox |
+   |---|---|---|
+   | macOS | 首次弹一次钥匙串授权框,选「始终允许」;uv 缓存重建导致解释器路径变化时会再弹一次 | 免授权 |
+   | Linux | 一般免授权(若 cookie 存在已上锁的 gnome-keyring/kwallet 则需解锁) | 免授权 |
+   | Windows | **不支持**(pycookiecheat 只支持 macOS/Linux),请设 `LINUXDO_BROWSER=firefox` 或手填 `LINUXDO_COOKIE` | 免授权 |
+
+`_t` 是 Discourse 的滚动 cookie,只要平时还在浏览器里登录着,读到的就一直是新鲜的;
+遇到 401/403 会自动清缓存重读一次浏览器,不必手动换 token。
+
+可选环境变量:
+
+| 变量 | 说明 |
+|---|---|
+| `LINUXDO_COOKIE` | 手工指定 cookie,形如 `_t=xxx`(裸 token 也可) |
+| `LINUXDO_BROWSER` | `chrome`(默认)/`chromium`/`brave`/`slack`/`firefox` |
+| `LINUXDO_COOKIE_TTL` | 缓存秒数,默认 `21600` |
+| `LINUXDO_CACHE_DIR` | 缓存目录,默认 `~/.cache/linuxdo-mcp` |
+| `LINUXDO_IMPERSONATE` | TLS 指纹,默认 `chrome` |
 
 - **Claude Code**:`claude mcp add-json linuxdo '<上面的内容>'`,或写进 `.mcp.json` / 设置。
 - **Cursor / Claude Desktop / Cline**:粘进各自的 MCP 配置文件即可。
@@ -72,12 +96,12 @@
 ## 本地运行(开发)
 
 ```bash
-export LINUXDO_COOKIE='_t=...'
 uvx --from . linuxdo-mcp        # 或 uv run src/linuxdo_mcp/server.py
 ```
 
 ## 备注
 
-- cookie 过期会返回 401/403,重新导出 `_t` 即可。
+- cookie 过期返回 401/403 时会自动重读浏览器一次;若浏览器里也已登出,重新登录即可。
+- 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只读取 linux.do 一个域名下的 cookie。
 - 偶发被 Cloudflare 拦截时会自动重试 3 次;仍失败可设 `LINUXDO_IMPERSONATE=chrome131`(或 `chrome124`)换指纹。
 - 所有请求为只读 GET,不做任何写操作。
