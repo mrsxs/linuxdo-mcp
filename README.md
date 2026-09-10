@@ -43,14 +43,11 @@
 ## 前置
 
 - 安装 [uv](https://docs.astral.sh/uv/)(提供 `uvx`)。
-- 用 Chrome/Chromium/Brave/Firefox 登录 linux.do 即可,cookie 默认自动读取,无需手工导出。
-  只需 `_t`,**不需要** `cf_clearance`。
-- 若不想让本工具读浏览器,可手工导出:F12 → Application → Cookies → `https://linux.do` → 复制 `_t` 的 Value,
-  填进下面的 `LINUXDO_COOKIE`。
+- 准备一个 linux.do 的登录 cookie(`_t`),给法见下方「登录配置」。只需 `_t`,**不需要** `cf_clearance`。
 
 ## 配置(复制到你的 MCP 客户端)
 
-无需下载代码,`uvx` 会自动从仓库拉取并运行。把下面这段加进客户端的 MCP 配置即可:
+`uvx` 会自动拉取并运行,无需下载代码。基础配置:
 
 ```json
 {
@@ -63,35 +60,74 @@
 }
 ```
 
-cookie 按以下顺序获取,通常什么都不用配:
-
-1. 环境变量 `LINUXDO_COOKIE`(想手工指定时用,优先级最高);
-2. 缓存文件 `~/.cache/linuxdo-mcp/cookie.json`(权限 600,默认 6 小时);
-3. 本机浏览器的 cookie 库。各平台差别:
-
-   | 平台 | Chrome/Chromium/Brave | Firefox |
-   |---|---|---|
-   | macOS | 首次弹一次钥匙串授权框,选「始终允许」;uv 缓存重建导致解释器路径变化时会再弹一次 | 免授权 |
-   | Linux | 一般免授权(若 cookie 存在已上锁的 gnome-keyring/kwallet 则需解锁) | 免授权 |
-   | Windows | **不支持**(pycookiecheat 只支持 macOS/Linux),请设 `LINUXDO_BROWSER=firefox` 或手填 `LINUXDO_COOKIE` | 免授权 |
-
-`_t` 是 Discourse 的滚动 cookie,只要平时还在浏览器里登录着,读到的就一直是新鲜的;
-遇到 401/403 会自动清缓存重读一次浏览器,不必手动换 token。
-
-可选环境变量:
-
-| 变量 | 说明 |
-|---|---|
-| `LINUXDO_COOKIE` | 手工指定 cookie,形如 `_t=xxx`(裸 token 也可) |
-| `LINUXDO_BROWSER` | `chrome`(默认)/`chromium`/`brave`/`slack`/`firefox` |
-| `LINUXDO_COOKIE_TTL` | 缓存秒数,默认 `21600` |
-| `LINUXDO_CACHE_DIR` | 缓存目录,默认 `~/.cache/linuxdo-mcp` |
-| `LINUXDO_IMPERSONATE` | TLS 指纹,默认 `chrome` |
+再按下面「登录配置」二选一填 `env`。
 
 - **Claude Code**:`claude mcp add-json linuxdo '<上面的内容>'`,或写进 `.mcp.json` / 设置。
 - **Cursor / Claude Desktop / Cline**:粘进各自的 MCP 配置文件即可。
 
+## 登录配置(两种方式,二选一)
+
+> 为什么不直接读你平时用的浏览器?因为工具和主浏览器**共用同一个 `_t`** 时,
+> Discourse 的 token 轮换会判定异常、把会话作废,导致**主浏览器被顶下线**。
+> 所以默认 `LINUXDO_READ_BROWSER=0`(不读浏览器),请用下面任一「独立身份」。
+
+### 方式一:独立 token(任何平台通用,最省心)
+
+在**隐身窗口**或另一个浏览器登录 linux.do,F12 → Application → Cookies → `https://linux.do`
+→ 复制 `_t` 的值,填进 `env`:
+
+```json
+"env": { "LINUXDO_COOKIE": "_t=你复制的值" }
+```
+
+只需填一次:工具之后自动接收 Discourse 轮换、写回缓存**自续期**,长期免维护,且与主浏览器互不影响。
+
+### 方式二:专用 Chrome profile 自动读(macOS/Linux,免手工复制)
+
+在 Chrome 右上角头像 →「添加」新建一个 profile(例:显示名 `linuxdo`),在其中登录 linux.do,然后:
+
+```json
+"env": {
+  "LINUXDO_READ_BROWSER": "1",
+  "LINUXDO_CHROME_PROFILE": "linuxdo"
+}
+```
+
+`LINUXDO_CHROME_PROFILE` 可填**显示名**(Chrome 菜单里看到的,如 `linuxdo`)或**目录名**(如 `Profile 1`);
+填错会列出所有可用 profile 供对照。工具首次自动读该 profile 做 bootstrap,之后同样走缓存自续期。
+你日常用的主 profile(`Default`)完全不受影响——只要不在这个专用 profile 里刷 linux.do 就永不冲突。
+
+## cookie 获取顺序与续期
+
+1. 缓存文件 `~/.cache/linuxdo-mcp/cookie.json`(权限 600,工具自维护、含轮换续期,最新);
+2. 环境变量 `LINUXDO_COOKIE`(方式一,首次 bootstrap 后写入缓存);
+3. 浏览器 cookie 库(方式二,仅当 `LINUXDO_READ_BROWSER=1`)。
+
+`_t` 是 Discourse 的滚动 token,工具每次请求都会接收服务器轮换回来的新值写回缓存,
+所以配一次通常长期有效;遇 401/403 会清缓存并提示更新。
+
+方式二各平台授权差异:
+
+| 平台 | Chrome/Chromium/Brave | Firefox |
+|---|---|---|
+| macOS | 首次弹一次钥匙串授权框,选「始终允许」;uv 缓存重建致解释器路径变化时会再弹一次 | 免授权 |
+| Linux | 一般免授权(cookie 若在已上锁的 gnome-keyring/kwallet 则需解锁) | 免授权 |
+| Windows | **不支持**(pycookiecheat 只支持 macOS/Linux),请用方式一或 `LINUXDO_BROWSER=firefox` | 免授权 |
+
+## 环境变量一览
+
+| 变量 | 说明 |
+|---|---|
+| `LINUXDO_COOKIE` | 方式一:手工指定 cookie,形如 `_t=xxx`(裸 token 也可) |
+| `LINUXDO_READ_BROWSER` | 方式二:置 `1` 才允许读浏览器(默认 `0`,防止与主浏览器互顶) |
+| `LINUXDO_CHROME_PROFILE` | 方式二:Chrome 系 profile 的显示名或目录名(如 `linuxdo` / `Profile 1`) |
+| `LINUXDO_BROWSER` | `chrome`(默认)/`chromium`/`brave`/`slack`/`firefox` |
+| `LINUXDO_COOKIE_TTL` | 缓存有效期秒数,默认 `2592000`(30 天,配合自续期) |
+| `LINUXDO_CACHE_DIR` | 缓存目录,默认 `~/.cache/linuxdo-mcp` |
+| `LINUXDO_IMPERSONATE` | TLS 指纹,默认 `chrome` |
+
 > ⚠️ `_t` 等于你的 linux.do 登录凭证,只填进自己的本地配置,**切勿分享给他人**。
+
 
 ## 本地运行(开发)
 
@@ -101,7 +137,7 @@ uvx --from . linuxdo-mcp        # 或 uv run src/linuxdo_mcp/server.py
 
 ## 备注
 
-- cookie 过期返回 401/403 时会自动重读浏览器一次;若浏览器里也已登出,重新登录即可。
+- cookie 过期返回 401/403 时会清缓存并提示更新;按你选的方式重配一次即可(方式二一般不会到期,浏览器保持登录时会自动续期)。
 - 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只读取 linux.do 一个域名下的 cookie。
 - 偶发被 Cloudflare 拦截时会自动重试 3 次;仍失败可设 `LINUXDO_IMPERSONATE=chrome131`(或 `chrome124`)换指纹。
 - 所有请求为只读 GET,不做任何写操作。

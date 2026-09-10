@@ -28,17 +28,17 @@ IMPERSONATE = os.environ.get("LINUXDO_IMPERSONATE", "chrome")
 mcp = _Server("linuxdo")
 
 
-def _cookie_header(force=False):
-    return cookies.get_cookie(force=force)
+def _cookie_header():
+    return cookies.get_cookie()
 
 
 def _blocked(body):
     return "Just a moment" in body[:600] or "challenge-platform" in body[:2000]
 
 
-def _fetch(path, _refreshed=False):
+def _fetch(path):
     url = path if path.startswith("http") else BASE + path
-    headers = {"Accept": "application/json", "Cookie": _cookie_header(force=_refreshed)}
+    headers = {"Accept": "application/json", "Cookie": _cookie_header()}
     last = ""
     for attempt in range(3):
         try:
@@ -53,17 +53,16 @@ def _fetch(path, _refreshed=False):
             time.sleep(0.8 * (attempt + 1))
             continue
         if r.status_code in (401, 403):
-            if not _refreshed:  # cookie 可能过期，丢掉缓存重新从浏览器取一次
-                cookies.clear_cache()
-                return _fetch(path, _refreshed=True)
+            cookies.clear_cache()  # 失效即清缓存，下次用 env 重新 bootstrap；不重读浏览器
             raise RuntimeError(
-                f"认证失败({r.status_code})：cookie 已失效。"
-                "请在浏览器里重新登录 linux.do，或更新 LINUXDO_COOKIE。"
+                f"认证失败({r.status_code})：cookie 已失效，"
+                "请更新 LINUXDO_COOKIE（独立 _t）后重试。"
             )
         if r.status_code == 429:
             raise RuntimeError("被限流(429)：请降低频率，稍后重试。")
         if r.status_code != 200 or not body.lstrip().startswith(("{", "[")):
             raise RuntimeError(f"异常响应 HTTP {r.status_code}: {body[:200]}")
+        cookies.absorb_rotation(r)  # 接收轮换后的新 _t，自续期
         return json.loads(body)
     raise RuntimeError(f"{last}（已重试 3 次）。可设 LINUXDO_IMPERSONATE=chrome131 换指纹。")
 

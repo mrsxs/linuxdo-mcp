@@ -11,7 +11,10 @@
 
 相关环境变量：
     LINUXDO_BROWSER      chrome(默认)/chromium/brave/slack/firefox
-    LINUXDO_COOKIE_TTL   缓存有效期秒数，默认 21600（6 小时）
+    LINUXDO_COOKIE_TTL   缓存有效期秒数，默认 2592000（30 天，配合轮换自续期）
+    LINUXDO_READ_BROWSER 置 1 才允许读浏览器（默认 0，避免与浏览器互顶）
+    LINUXDO_CHROME_PROFILE 指定 Chrome 系 profile，可填显示名（如 "linuxdo"）
+                         或目录名（如 "Profile 1"）；用专用 profile 与主浏览器互不干扰
 """
 import json
 import os
@@ -29,9 +32,9 @@ CACHE = pathlib.Path(
 
 def _ttl():
     try:
-        return int(os.environ.get("LINUXDO_COOKIE_TTL", "21600"))
+        return int(os.environ.get("LINUXDO_COOKIE_TTL", "2592000"))
     except ValueError:
-        return 21600
+        return 2592000
 
 
 def _normalize(raw):
@@ -67,6 +70,81 @@ def clear_cache():
         pass
 
 
+def _list_chrome_profiles(root_abs):
+    """返回 [(目录名, 显示名), ...]。显示名取自 Chrome 的 Local State/info_cache。"""
+    names = {}
+    ls = os.path.join(root_abs, "Local State")
+    try:
+        cache = json.load(open(ls)).get("profile", {}).get("info_cache", {})
+        names = {d: (info or {}).get("name") for d, info in cache.items()}
+    except Exception:
+        pass
+    out = []
+    for entry in sorted(os.listdir(root_abs)):
+        if os.path.isfile(os.path.join(root_abs, entry, "Preferences")):
+            out.append((entry, names.get(entry)))
+    return out
+
+
+def _resolve_chrome_profile(root_abs, wanted):
+    """把 LINUXDO_CHROME_PROFILE 解析成 profile 目录名：先按目录名，再按显示名匹配。"""
+    profiles = _list_chrome_profiles(root_abs)
+    dirs = {d for d, _ in profiles}
+    if wanted in dirs:  # 直接给的就是目录名
+        return wanted
+    hits = [d for d, name in profiles if name and name == wanted]  # 按显示名
+    if len(hits) == 1:
+        return hits[0]
+    listing = "、".join(
+        f'「{name or "?"}」(目录 {d})' for d, name in profiles) or "（无）"
+    if len(hits) > 1:
+        raise RuntimeError(
+            f"有多个 profile 显示名都是「{wanted}」：{hits}，请改用目录名。当前：{listing}")
+    raise RuntimeError(
+        f"找不到 profile「{wanted}」（可用显示名或目录名）。当前 Chrome profile：{listing}")
+
+
+def _chrome_cookie_file():
+    """若指定了 LINUXDO_CHROME_PROFILE（如 "Profile 1"），返回该 profile 的 Cookies 库路径。
+    未指定则返回 None（走 pycookiecheat 默认的 Default profile）。"""
+    profile = os.environ.get("LINUXDO_CHROME_PROFILE", "").strip()
+    if not profile:
+        return None
+    name = os.environ.get("LINUXDO_BROWSER", "chrome").strip().lower()
+    home = os.path.expanduser("~")
+    roots = {
+        "darwin": {
+            "chrome": "Library/Application Support/Google/Chrome",
+            "chromium": "Library/Application Support/Chromium",
+            "brave": "Library/Application Support/BraveSoftware/Brave-Browser",
+        },
+        "linux": {
+            "chrome": ".config/google-chrome",
+            "chromium": ".config/chromium",
+            "brave": ".config/BraveSoftware/Brave-Browser",
+        },
+    }
+    plat = "darwin" if sys.platform == "darwin" else "linux"
+    root = roots.get(plat, {}).get(name)
+    if not root:
+        raise RuntimeError(
+            f"LINUXDO_CHROME_PROFILE 暂不支持 浏览器={name} 平台={sys.platform}。"
+        )
+    root_abs = os.path.join(home, root)
+    profile_dir = _resolve_chrome_profile(root_abs, profile)  # 支持显示名或目录名
+    # 新版 Chrome 的 cookie 库在 profile 下的 Network/Cookies，旧版直接在 profile/Cookies
+    base = os.path.join(root_abs, profile_dir)
+    for rel in ("Network/Cookies", "Cookies"):
+        f = os.path.join(base, rel)
+        if os.path.exists(f):
+            return f
+    raise RuntimeError(
+        f"找不到 profile「{profile}」的 cookie 库（查过 {base}/Network/Cookies 与 /Cookies）；"
+        "确认 LINUXDO_CHROME_PROFILE 是 profile 目录名（如 Default / Profile 1），"
+        "且已在该 profile 里登录过 linux.do。"
+    )
+
+
 def _from_browser():
     """从本机浏览器 cookie 库读取 linux.do 的 _t。失败抛 RuntimeError。"""
     name = os.environ.get("LINUXDO_BROWSER", "chrome").strip().lower()
@@ -90,7 +168,8 @@ def _from_browser():
             browser = getattr(pycookiecheat.BrowserType, name.upper(), None)
             if browser is None:
                 raise RuntimeError(f"不支持的 LINUXDO_BROWSER={name}")
-            jar = pycookiecheat.chrome_cookies(URL, browser=browser)
+            jar = pycookiecheat.chrome_cookies(
+                URL, browser=browser, cookie_file=_chrome_cookie_file())
     except RuntimeError:
         raise
     except Exception as e:
@@ -108,15 +187,48 @@ def _from_browser():
     return f"{COOKIE_NAME}={token}"
 
 
-def get_cookie(force=False):
-    """返回可直接用作 Cookie 头的字符串。force=True 时跳过缓存重新读浏览器。"""
+def _read_browser_enabled():
+    return os.environ.get("LINUXDO_READ_BROWSER", "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def get_cookie():
+    """返回可直接用作 Cookie 头的字符串。
+
+    来源优先级：
+      1. 缓存文件（工具自维护，含轮换续期，最新）
+      2. 环境变量 LINUXDO_COOKIE（首次 bootstrap，会写入缓存）
+      3. 浏览器 cookie 库（仅当 LINUXDO_READ_BROWSER 开启）
+
+    默认不读主浏览器：主浏览器与本工具共用同一 _t 会被 Discourse 互相顶下线。
+    """
+    cached = _read_cache()
+    if cached:
+        return cached
     env = _normalize(os.environ.get("LINUXDO_COOKIE"))
     if env:
+        _write_cache(env)
         return env
-    if not force:
-        cached = _read_cache()
-        if cached:
-            return cached
-    cookie = _from_browser()
-    _write_cache(cookie)
-    return cookie
+    if _read_browser_enabled():
+        cookie = _from_browser()
+        _write_cache(cookie)
+        return cookie
+    raise RuntimeError(
+        "未配置登录 cookie。请设置 LINUXDO_COOKIE=_t=... ；"
+        "若确实要自动读浏览器，设 LINUXDO_READ_BROWSER=1——"
+        "但读主浏览器会与它共用同一登录、可能互相顶下线，"
+        "强烈建议改用隐身窗口/独立 profile 登录后取其独立 _t。"
+    )
+
+
+def absorb_rotation(response):
+    """Discourse 会定期轮换 _t。若响应里带回新的 _t，就更新缓存，实现自续期。"""
+    try:
+        jar = getattr(response, "cookies", None)
+        if not jar:
+            return
+        token = jar.get(COOKIE_NAME) if hasattr(jar, "get") else None
+        if token:
+            _write_cache(f"{COOKIE_NAME}={token}")
+    except Exception:
+        pass
