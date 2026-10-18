@@ -159,7 +159,6 @@ linuxdo-mcp install-handler | uninstall-handler   # 仅 macOS;login 会按需自
 
 ```bash
 uvx --from . linuxdo-mcp        # 或 uv run linuxdo-mcp
-uv run pytest                   # 单元测试(不访问网络)
 ```
 
 ## 备注

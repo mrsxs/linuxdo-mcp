@@ -13,3 +13,7 @@ build/
 *.tar.gz
 *.zip
 .pytest_cache/
+
+# 本地文档与测试，不提交
+docs/
+tests/
