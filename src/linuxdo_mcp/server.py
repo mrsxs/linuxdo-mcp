@@ -387,7 +387,7 @@ def _logout():
 
 
 def _cli_login():
-    where = "默认浏览器" if handler.installed() else "专用浏览器窗口"
+    where = "默认浏览器" if handler.ensure_installed() else "专用浏览器窗口"
     print(f"正在{where}打开 linux.do 授权页：需要时先过验证，然后点「授权」…", file=sys.stderr)
     auth.login()
     return _whoami()
@@ -398,10 +398,13 @@ LOGIN_TIMEOUT_RANGE = (30, 600)
 
 @mcp.tool()
 async def login(timeout_seconds: int = auth.DEFAULT_TIMEOUT) -> dict:
-    """授权登录 linux.do。装了回调小程序（命令行 `linuxdo-mcp install-handler`）时，
-    会在你的默认浏览器打开 linux.do 授权页：点「授权」并允许打开 linuxdo-mcp-auth 即可；
-    若弹出专用浏览器窗口显示「请验证您是真人」，点一下过 Cloudflare 验证。
-    没装小程序则在专用浏览器里授权（需要在其中登录 linux.do）。
+    """授权登录 linux.do。
+    macOS 上若 discourse: 链接没有别的 App 接管，会先在 ~/Applications 生成回调小程序
+    linuxdo-mcp-auth 并设为 discourse: 的默认处理程序（本机编译，不下载；
+    `linuxdo-mcp uninstall-handler` 可删除并还原），然后在默认浏览器打开授权页：
+    点「授权」并允许打开 linuxdo-mcp-auth 即可；若弹出专用浏览器窗口显示「请验证您是真人」，
+    点一下过 Cloudflare 验证。discourse: 已归 FluxDO 等其它 App、或非 macOS 时不安装，
+    改在专用浏览器里授权（需要在其中登录 linux.do）。
     换到的是本工具独立的登录会话，不影响你日常浏览器的登录。成功后返回当前用户。
     timeout_seconds 为等待你完成操作的最长秒数（30–600）。"""
     lo, hi = LOGIN_TIMEOUT_RANGE

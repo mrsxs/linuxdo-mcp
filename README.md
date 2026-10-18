@@ -22,7 +22,7 @@
 
 | 工具 | 返回 | 说明 |
 |------|------|------|
-| `login(timeout_seconds=300)` | JSON | 授权登录(在浏览器里点「授权」),成功后返回当前用户 |
+| `login(timeout_seconds=300)` | JSON | 授权登录(在浏览器里点「授权」;macOS 首次会自动装回调小程序,见下文),成功后返回当前用户 |
 | `logout()` | JSON | 清除本工具保存的登录会话 |
 | `whoami()` | JSON | 本工具当前登录的用户与信任等级 |
 | `search(query, page=1, pages=1)` | JSON | 全量搜索,`query` 支持 Discourse 高级语法 |
@@ -90,25 +90,28 @@ linux.do 收窄了 User API Key 的权限(不给 `read`/`write`),能用的只有
 
 ### macOS(推荐):在日常浏览器里授权
 
-```bash
-# 一次性:装 discourse:// 回调小程序并设为默认处理程序(会记下原来的,如 FluxDO)
-uvx --from git+https://github.com/mrsxs/linuxdo-mcp linuxdo-mcp install-handler
+在 MCP 客户端里让它调用 `login` 工具即可,或命令行:
 
-# 登录:默认浏览器打开授权页 → 点「授权」→ 允许打开 linuxdo-mcp-auth
+```bash
+# 默认浏览器打开授权页 → 点「授权」→ 允许打开 linuxdo-mcp-auth
 uvx --from git+https://github.com/mrsxs/linuxdo-mcp linuxdo-mcp login
 ```
 
-也可以在 MCP 客户端里直接让它调用 `login` 工具。小程序装在 `~/Applications/linuxdo-mcp-auth.app`,
-只做一件事:把收到的回调地址写进 `~/.cache/linuxdo-mcp/callback.url`(权限 600);
-回调内容是用本次登录临时生成的公钥加密的,只有发起登录的进程能解开。
-`linuxdo-mcp uninstall-handler` 删除小程序并把 `discourse:` 还给原来的处理程序。
+**首次登录会自动安装回调小程序**(前提是 `discourse:` 链接还没有别的 App 接管):
 
-> 注意:设成默认后,FluxDO 等同样用 `discourse://` 回调的客户端,其授权登录回调会被这个小程序接走,
-> 需要时先 `uninstall-handler`。
+- 位置 `~/Applications/linuxdo-mcp-auth.app`,用系统自带的 `osacompile` 在本机编译、ad-hoc 签名,
+  **不从网络下载任何东西**;安装时把它设为 `discourse:` 的默认处理程序。
+- 只做一件事:把收到的回调地址写进 `~/.cache/linuxdo-mcp/callback.url`(权限 600);
+  回调内容是用本次登录临时生成的公钥加密的,只有发起登录的进程能解开。
+- 卸载:`linuxdo-mcp uninstall-handler`,删除小程序并把 `discourse:` 还给原来的处理程序。
 
-### 其他平台:在专用浏览器里授权
+> `discourse:` 已归 FluxDO 等客户端时**不会抢占**,`login` 改走下面的专用浏览器。
+> 想仍在日常浏览器授权,手动执行 `linuxdo-mcp install-handler`(会记下原处理程序,卸载时还原);
+> 之后 FluxDO 的授权登录回调会被小程序接走,需要时先 `uninstall-handler`。
 
-没装回调小程序时,`login` 会在专用 Chrome 里打开授权页,工具通过 CDP 直接截获回调;
+### 其他平台 / discourse: 已被占用:在专用浏览器里授权
+
+`login` 会在专用 Chrome 里打开授权页,工具通过 CDP 直接截获回调;
 需要在这个窗口里登录一次 linux.do(登录态保存在专用 profile,下次不用再登)。
 
 ### 兜底:手工指定 `_t`
@@ -131,7 +134,7 @@ uvx --from git+https://github.com/mrsxs/linuxdo-mcp linuxdo-mcp login
 ```bash
 linuxdo-mcp                     # 作为 MCP 服务器运行(stdio)
 linuxdo-mcp login | logout | whoami
-linuxdo-mcp install-handler | uninstall-handler   # 仅 macOS
+linuxdo-mcp install-handler | uninstall-handler   # 仅 macOS;login 会按需自动 install
 ```
 
 ## 环境变量一览
@@ -160,4 +163,5 @@ uv run pytest                   # 单元测试(不访问网络)
 
 - 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只取 linux.do 的 `cf_clearance`。
 - 被 Cloudflare 拦截时会自动刷新 clearance 后重试一次;仍失败可设 `LINUXDO_IMPERSONATE=chrome146` 换指纹。
+- 短时间连续请求(实测十几次)也会触发 Cloudflare 验证,批量读帖请放慢或分批。
 - 读取类工具全部是 GET;写操作只发生在登录时(换会话、撤销临时 key)。

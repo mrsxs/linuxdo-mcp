@@ -5,7 +5,7 @@ from .test_auth import keypair, login_harness  # noqa: F401  复用 fixture
 
 def test_login_via_handler_opens_default_browser(login_harness, monkeypatch):  # noqa: F811
     opened = []
-    monkeypatch.setattr(auth.handler, "installed", lambda: True)
+    monkeypatch.setattr(auth.handler, "ensure_installed", lambda: True)
     monkeypatch.setattr(auth.handler, "open_in_browser", opened.append)
     monkeypatch.setattr(auth.cf, "refresh", lambda: cf.save({"cf_clearance": "pre", "user_agent": "UA"}))
     login_harness["with_callback"]("nonce-1")

@@ -5,8 +5,9 @@ linux.do 的 allow_user_api_key_scopes 收窄过（不含 read/write），User A
 
 流程：
 1. 本地生成 RSA 密钥对，打开 /user-api-key/new 授权页，点「授权」：
-   - 装了回调小程序（handler.py）：在默认浏览器（日常已登录的账号）里授权
-   - 没装：在专用浏览器里授权，需要时先过 Cloudflare 验证、登录 linux.do
+   - macOS 且 discourse: 没被别的 App 占用：自动装回调小程序（handler.py），在默认浏览器
+     （日常已登录的账号）里授权
+   - 否则在专用浏览器里授权，需要时先过 Cloudflare 验证、登录 linux.do
 2. 拿到服务端跳往 discourse://auth_redirect?payload=…&oneTimePassword=… 的回调
    （小程序写文件 / CDP 截获），私钥解密
 3. GET /session/csrf + POST /session/otp/<otp> 兑换出新的 _t（独立会话，不和任何浏览器互顶）
@@ -210,13 +211,13 @@ def _callback_via_dedicated_browser(auth_url, timeout):
 def login(timeout=DEFAULT_TIMEOUT):
     """完整授权登录流程，成功后把新会话写入 session.json。
 
-    装了 discourse:// 回调小程序（`linuxdo-mcp install-handler`）时在默认浏览器里授权，
-    用的是你日常已登录的账号；否则退回专用浏览器（需要在其中登录 linux.do）。"""
+    macOS 上按需自动装 discourse:// 回调小程序，在默认浏览器里授权，用的是你日常已登录的账号；
+    装不了（非 macOS，或 discourse: 已归 FluxDO 等）则退回专用浏览器（需要在其中登录 linux.do）。"""
     with _LOCK:
         private_key, public_pem = new_keypair()
         nonce, client_id = secrets.token_hex(16), _client_id()
         auth_url = build_auth_url(client_id, public_pem, nonce)
-        if handler.installed():
+        if handler.ensure_installed():
             callback = _callback_via_handler(auth_url, timeout)
         else:
             callback = _callback_via_dedicated_browser(auth_url, timeout)

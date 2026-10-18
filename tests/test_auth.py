@@ -104,7 +104,7 @@ def login_harness(monkeypatch, keypair):
         seen["url"] = url
         yield object(), "T"
 
-    monkeypatch.setattr(auth.handler, "installed", lambda: False)
+    monkeypatch.setattr(auth.handler, "ensure_installed", lambda: False)
     monkeypatch.setattr(auth.browser, "open_page", open_page)
     monkeypatch.setattr(auth.cf, "harvest", lambda chrome: {"cf_clearance": "c", "user_agent": "UA"})
     monkeypatch.setattr(auth, "exchange_otp", lambda otp: seen.setdefault("otp", otp) and "_t=fresh")

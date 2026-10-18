@@ -5,7 +5,8 @@ discourse: 的默认处理程序后：login 在默认浏览器打开授权页 �
 打开 linuxdo-mcp-auth → 它把回调地址写进 <缓存目录>/callback.url（600 权限）→ login 读取。
 回调里的 payload / OTP 都是用本次 login 临时生成的公钥加密的，只有发起 login 的进程能解开。
 
-安装会记下原来的默认处理程序（比如 FluxDO），uninstall 时还原。
+login 时 discourse: 没有别的处理程序就自动安装（ensure_installed）；被 FluxDO 等占着则不抢，
+需要时手动 install-handler。安装会记下原来的默认处理程序，uninstall 时还原。
 """
 import ctypes
 import os
@@ -87,6 +88,22 @@ def _set_default_handler(bundle_id):
 
 def installed():
     return sys.platform == "darwin" and APP_PATH.exists() and default_handler().lower() == BUNDLE_ID
+
+
+def ensure_installed():
+    """login 前按需安装，返回能否走默认浏览器授权。
+
+    discourse: 空着、或仍指向本小程序（App 被删了）时装上；已归别的 App（如 FluxDO）时不抢，
+    返回 False 让 login 退回专用浏览器。"""
+    if sys.platform != "darwin":
+        return False
+    if installed():
+        return True
+    current = default_handler().lower()
+    if current and current != BUNDLE_ID:
+        return False
+    install()
+    return True
 
 
 def app_info_plist(original):
