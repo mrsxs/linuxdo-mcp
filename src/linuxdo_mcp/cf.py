@@ -48,6 +48,12 @@ def is_blocked(status, body, headers=None):
     return "Just a moment" in head or "challenge-platform" in head or "cf-chl" in head
 
 
+def is_rate_limited(status, body, headers=None):
+    """Cloudflare 速率限制规则触发的挑战（429 + 挑战页）。是请求太密导致的，
+    换 clearance 没用，只能停下来等它过去；Discourse 自己的 429 是纯文本，不算。"""
+    return status == 429 and is_blocked(status, body, headers)
+
+
 def harvest(chrome):
     """从专用浏览器取出 linux.do 的 cf_clearance 与 UA；还没有 clearance 时返回空 dict。"""
     value = next((c["value"] for c in chrome.cookies()

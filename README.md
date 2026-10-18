@@ -147,7 +147,10 @@ linuxdo-mcp install-handler | uninstall-handler   # 仅 macOS;login 会按需自
 | `LINUXDO_CHROME` | 专用浏览器的可执行文件路径(默认自动探测 Chrome/Chromium/Edge/Brave) |
 | `LINUXDO_CF_TIMEOUT` | 等待过盾的秒数,默认 `180` |
 | `LINUXDO_CACHE_DIR` | 缓存目录,默认 `~/.cache/linuxdo-mcp` |
-| `LINUXDO_IMPERSONATE` | TLS 指纹,默认 `chrome` |
+| `LINUXDO_IMPERSONATE` | TLS 指纹,默认按 UA 的 Chrome 版本自动选(库里没有该版本时用最接近的旧版) |
+| `LINUXDO_MIN_INTERVAL` | 瞬时限速:两次请求的最小间隔秒数,默认 `0.5` |
+| `LINUXDO_WINDOW_LIMIT` / `LINUXDO_WINDOW_SECONDS` | 总量限速:任意 `WINDOW_SECONDS` 秒内最多 `WINDOW_LIMIT` 条,默认 5 分钟 110 条 |
+| `LINUXDO_RATE_LIMIT_COOLDOWN` | 被 Cloudflare 限流后暂停请求的秒数,默认 `240` |
 
 > ⚠️ `session.json` 里的 `_t` 等于你的 linux.do 登录凭证,**切勿分享给他人**。
 
@@ -163,5 +166,12 @@ uv run pytest                   # 单元测试(不访问网络)
 
 - 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只取 linux.do 的 `cf_clearance`。
 - 被 Cloudflare 拦截时会自动刷新 clearance 后重试一次;仍失败可设 `LINUXDO_IMPERSONATE=chrome146` 换指纹。
-- 短时间连续请求(实测十几次)也会触发 Cloudflare 验证,批量读帖请放慢或分批。
+- 连续读帖会触发 Cloudflare 限流:按「IP + Cloudflare 的 `_cfuvid` cookie」分访客计数,实测每个访客
+  约 4 分钟里发到 120～150 条就触发(每分钟 60 条约 2 分钟、40 条约 4 分钟触发,35 条连跑 10 分钟不触发),
+  触发后约 4 分钟才恢复,换 clearance 也没用。
+- 所以限速分两层:小批量(比如一次查 100 个帖子,实测约 1 分钟)按 0.5 秒间隔全速发;5 分钟内累计到 110 条就要等最早的
+  请求移出窗口,要等超过 30 秒时工具直接报「约 N 秒后恢复额度」。中间停下来看几分钟帖子,额度会自己回来。
+- 真被限流时工具直接报错并暂停请求 `LINUXDO_RATE_LIMIT_COOLDOWN` 秒。
+- 不带 `_cfuvid` 的请求全挤在同一个 IP 名下,几条就会被拦;所以工具会复用会话、记住 Cloudflare 发的
+  `_cfuvid`/`__cf_bm`,之后每个请求都带上。
 - 读取类工具全部是 GET;写操作只发生在登录时(换会话、撤销临时 key)。

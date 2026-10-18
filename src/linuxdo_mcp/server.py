@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -34,7 +35,41 @@ def _errors(body):
     return "；".join(errs) if isinstance(errs, list) else ""
 
 
-def _fetch(path):
+CACHE_TTL = 120
+_CACHE_MAX = 256
+_cache = {}  # (path, 会话 cookie) -> (过期时刻, 响应正文)
+_CACHE_LOCK = threading.Lock()  # 同步工具在 MCP 的工作线程里并发执行
+
+
+def _clear_cache():
+    with _CACHE_LOCK:
+        _cache.clear()
+
+
+def _cached(key):
+    with _CACHE_LOCK:
+        hit = _cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return json.loads(hit[1])  # 每次重新解析，调用方改了也不污染缓存
+    return None
+
+
+def _remember(key, body):
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        if len(_cache) >= _CACHE_MAX:
+            for k in [k for k, (exp, _) in _cache.items() if exp <= now] or list(_cache)[:_CACHE_MAX // 4]:
+                _cache.pop(k, None)
+        _cache[key] = (now + CACHE_TTL, body)
+
+
+def _fetch(path, cache=True):
+    """GET 并解析 JSON；同一地址 CACHE_TTL 秒内直接用缓存，少打 linux.do（连发易触发 Cloudflare）。
+
+    缓存按会话 cookie 区分：换了账号或会话（含命令行 login、手改 session.json）不会读到旧账号的内容。"""
+    key = (path, session.get_cookie())
+    if cache and (data := _cached(key)) is not None:
+        return data
     r = client.request("GET", path)
     body = r.text
     if r.headers.get("discourse-logged-out") and session.get_cookie():
@@ -49,7 +84,10 @@ def _fetch(path):
         raise RuntimeError("被限流(429)：请降低频率，稍后重试。")
     if r.status_code != 200 or not body.lstrip().startswith(("{", "[")):
         raise RuntimeError(f"异常响应 HTTP {r.status_code}: {body[:200]}")
-    return json.loads(body)
+    data = json.loads(body)
+    if cache:
+        _remember(key, body)
+    return data
 
 
 def _strip_html(s):
@@ -129,7 +167,7 @@ def _whoami():
     if not session.get_cookie():
         raise RuntimeError("未登录：请调用 login 工具（或命令行 `linuxdo-mcp login`）授权登录。")
     try:
-        u = _fetch("/session/current.json").get("current_user") or {}
+        u = _fetch("/session/current.json", cache=False).get("current_user") or {}
     except RuntimeError as e:
         if "404" not in str(e):  # Discourse 对未登录的 current.json 回 404
             raise
@@ -383,6 +421,7 @@ def _format_topic(topic_id, posts, start):
 
 def _logout():
     session.clear()
+    _clear_cache()
     return {"logged_out": True}
 
 
@@ -410,6 +449,7 @@ async def login(timeout_seconds: int = auth.DEFAULT_TIMEOUT) -> dict:
     lo, hi = LOGIN_TIMEOUT_RANGE
     # 要等用户在浏览器里操作几分钟，放到线程里跑，别卡住 MCP 的事件循环
     await anyio.to_thread.run_sync(auth.login, min(max(timeout_seconds, lo), hi))
+    _clear_cache()  # 换了会话，旧缓存可能是别的账号/权限下的内容
     return await anyio.to_thread.run_sync(_whoami)
 
 

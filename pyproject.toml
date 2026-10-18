@@ -1,6 +1,6 @@
 [project]
 name = "linuxdo-mcp"
-version = "0.3.1"
+version = "0.4.0"
 description = "MCP server for searching and reading linux.do (Discourse)"
 readme = "README.md"
 requires-python = ">=3.10"
