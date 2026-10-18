@@ -15,14 +15,16 @@
 
   
 搜索 / 阅读 [linux.do](https://linux.do)(Discourse 论坛)的 MCP 服务器。
-用 [curl_cffi](https://github.com/lexiforest/curl_cffi) 模拟 Chrome TLS 指纹绕过 Cloudflare,
-凭登录 cookie 访问受信任等级限制的内容。
+用 [curl_cffi](https://github.com/lexiforest/curl_cffi) 模拟 Chrome TLS 指纹,配合真实浏览器的
+`cf_clearance` 过 Cloudflare;通过 linux.do **授权登录**拿到本工具独立的会话,访问受信任等级限制的内容。
 
 ## 工具
 
 | 工具 | 返回 | 说明 |
 |------|------|------|
-| `whoami()` | JSON | 当前 cookie 对应的登录用户与信任等级 |
+| `login(timeout_seconds=300)` | JSON | 授权登录(在浏览器里点「授权」),成功后返回当前用户 |
+| `logout()` | JSON | 清除本工具保存的登录会话 |
+| `whoami()` | JSON | 本工具当前登录的用户与信任等级 |
 | `search(query, page=1, pages=1)` | JSON | 全量搜索,`query` 支持 Discourse 高级语法 |
 | `get_topic(topic_id, posts=5)` | JSON | 话题详情 + 前 N 楼正文 |
 | `list_categories()` | JSON | 所有板块,含各自话题数 `topic_count`、帖子数 `post_count` |
@@ -43,7 +45,8 @@
 ## 前置
 
 - 安装 [uv](https://docs.astral.sh/uv/)(提供 `uvx`)。
-- 准备一个 linux.do 的登录 cookie(`_t`),给法见下方「登录配置」。只需 `_t`,**不需要** `cf_clearance`。
+- 装有 Chrome(或 Chromium/Brave),平时在里面访问过 linux.do。
+- 不登录也能读公开内容;要读受等级限制的板块,按下方「授权登录」做一次即可。
 
 ## 配置(复制到你的 MCP 客户端)
 
@@ -60,84 +63,101 @@
 }
 ```
 
-再按下面「登录配置」二选一填 `env`。
-
 - **Claude Code**:`claude mcp add-json linuxdo '<上面的内容>'`,或写进 `.mcp.json` / 设置。
 - **Cursor / Claude Desktop / Cline**:粘进各自的 MCP 配置文件即可。
 
-## 登录配置(两种方式,二选一)
+## 过 Cloudflare
 
-> 为什么不直接读你平时用的浏览器?因为工具和主浏览器**共用同一个 `_t`** 时,
-> Discourse 的 token 轮换会判定异常、把会话作废,导致**主浏览器被顶下线**。
-> 所以默认 `LINUXDO_READ_BROWSER=0`(不读浏览器),请用下面任一「独立身份」。
+linux.do 对非浏览器客户端一律弹盾,光模拟 TLS 指纹已经过不去。工具的做法是借用真实浏览器
+过盾后铸出的 `cf_clearance`,配上同一个 User-Agent 发请求:
 
-### 方式一:独立 token(任何平台通用,最省心)
+1. **读日常 Chrome 里现成的 `cf_clearance`**(扫描所有 profile 取最新的一份;**只读这一个 cookie,
+   不碰登录态 `_t`**)。macOS 首次会弹钥匙串授权「Chrome Safe Storage」,选「始终允许」。
+2. 现成的过期了:在默认浏览器打开一次 linux.do 让它刷新,等写盘后再读(约半分钟内)。
+3. 都不行(Windows / Firefox 等读不了 cookie)时,弹一个**专用 Chrome**(独立 profile,
+   在 `~/.cache/linuxdo-mcp/chrome-profile`)让你点「请验证您是真人」。新 profile 铸的 clearance
+   信任度低,可能时好时坏,只作兜底。
 
-在**隐身窗口**或另一个浏览器登录 linux.do,F12 → Application → Cookies → `https://linux.do`
-→ 复制 `_t` 的值,填进 `env`:
+## 授权登录
 
-```json
-"env": { "LINUXDO_COOKIE": "_t=你复制的值" }
+> 为什么不直接用浏览器里的 `_t`?Discourse 每 10 分钟轮换一次 `_t`,工具一用主浏览器的 `_t`
+> 就可能触发轮换,新 token 落到工具手里,**主浏览器一分钟后被顶下线**。所以改为授权登录,
+> 拿一个**独立会话**,两边各用各的,永不冲突。
+
+linux.do 收窄了 User API Key 的权限(不给 `read`/`write`),能用的只有 `one_time_password`:
+授权后回调里带一个加密的一次性密码,工具用它换一个全新的登录会话,随后撤销这个 key。
+回调只允许 `discourse://auth_redirect`,所以需要一个接收它的小程序。
+
+### macOS(推荐):在日常浏览器里授权
+
+```bash
+# 一次性:装 discourse:// 回调小程序并设为默认处理程序(会记下原来的,如 FluxDO)
+uvx --from git+https://github.com/mrsxs/linuxdo-mcp linuxdo-mcp install-handler
+
+# 登录:默认浏览器打开授权页 → 点「授权」→ 允许打开 linuxdo-mcp-auth
+uvx --from git+https://github.com/mrsxs/linuxdo-mcp linuxdo-mcp login
 ```
 
-只需填一次:工具之后自动接收 Discourse 轮换、写回缓存**自续期**,长期免维护,且与主浏览器互不影响。
+也可以在 MCP 客户端里直接让它调用 `login` 工具。小程序装在 `~/Applications/linuxdo-mcp-auth.app`,
+只做一件事:把收到的回调地址写进 `~/.cache/linuxdo-mcp/callback.url`(权限 600);
+回调内容是用本次登录临时生成的公钥加密的,只有发起登录的进程能解开。
+`linuxdo-mcp uninstall-handler` 删除小程序并把 `discourse:` 还给原来的处理程序。
 
-### 方式二:专用 Chrome profile 自动读(macOS/Linux,免手工复制)
+> 注意:设成默认后,FluxDO 等同样用 `discourse://` 回调的客户端,其授权登录回调会被这个小程序接走,
+> 需要时先 `uninstall-handler`。
 
-在 Chrome 右上角头像 →「添加」新建一个 profile(例:显示名 `linuxdo`),在其中登录 linux.do,然后:
+### 其他平台:在专用浏览器里授权
+
+没装回调小程序时,`login` 会在专用 Chrome 里打开授权页,工具通过 CDP 直接截获回调;
+需要在这个窗口里登录一次 linux.do(登录态保存在专用 profile,下次不用再登)。
+
+### 兜底:手工指定 `_t`
 
 ```json
-"env": {
-  "LINUXDO_READ_BROWSER": "1",
-  "LINUXDO_CHROME_PROFILE": "linuxdo"
-}
+"env": { "LINUXDO_COOKIE": "_t=从隐身窗口复制的值" }
 ```
 
-`LINUXDO_CHROME_PROFILE` 可填**显示名**(Chrome 菜单里看到的,如 `linuxdo`)或**目录名**(如 `Profile 1`);
-填错会列出所有可用 profile 供对照。工具首次自动读该 profile 做 bootstrap,之后同样走缓存自续期。
-你日常用的主 profile(`Default`)完全不受影响——只要不在这个专用 profile 里刷 linux.do 就永不冲突。
+用隐身窗口或另一个浏览器登录后复制的 `_t` 也是独立会话;工具会接收轮换自动续期。
 
-## cookie 获取顺序与续期
+## 会话与续期
 
-1. 缓存文件 `~/.cache/linuxdo-mcp/cookie.json`(权限 600,工具自维护、含轮换续期,最新);
-2. 环境变量 `LINUXDO_COOKIE`(方式一,首次 bootstrap 后写入缓存);
-3. 浏览器 cookie 库(方式二,仅当 `LINUXDO_READ_BROWSER=1`)。
+- 会话保存在 `~/.cache/linuxdo-mcp/session.json`(权限 600),每次请求接收 Discourse 轮换回来的新 `_t`,
+  配一次通常长期有效。服务端判定会话失效时会清掉本地会话并提示重新 `login`。
+- `logout` 只清本地;服务端会话可在 linux.do「偏好设置 → 安全 → 最近使用的设备」里注销。
+- 不登录也能用,按匿名访问公开内容。
 
-`_t` 是 Discourse 的滚动 token,工具每次请求都会接收服务器轮换回来的新值写回缓存,
-所以配一次通常长期有效;遇 401/403 会清缓存并提示更新。
+## 命令行
 
-方式二各平台授权差异:
-
-| 平台 | Chrome/Chromium/Brave | Firefox |
-|---|---|---|
-| macOS | 首次弹一次钥匙串授权框,选「始终允许」;uv 缓存重建致解释器路径变化时会再弹一次 | 免授权 |
-| Linux | 一般免授权(cookie 若在已上锁的 gnome-keyring/kwallet 则需解锁) | 免授权 |
-| Windows | **不支持**(pycookiecheat 只支持 macOS/Linux),请用方式一或 `LINUXDO_BROWSER=firefox` | 免授权 |
+```bash
+linuxdo-mcp                     # 作为 MCP 服务器运行(stdio)
+linuxdo-mcp login | logout | whoami
+linuxdo-mcp install-handler | uninstall-handler   # 仅 macOS
+```
 
 ## 环境变量一览
 
 | 变量 | 说明 |
 |---|---|
-| `LINUXDO_COOKIE` | 方式一:手工指定 cookie,形如 `_t=xxx`(裸 token 也可) |
-| `LINUXDO_READ_BROWSER` | 方式二:置 `1` 才允许读浏览器(默认 `0`,防止与主浏览器互顶) |
-| `LINUXDO_CHROME_PROFILE` | 方式二:Chrome 系 profile 的显示名或目录名(如 `linuxdo` / `Profile 1`) |
-| `LINUXDO_BROWSER` | `chrome`(默认)/`chromium`/`brave`/`slack`/`firefox` |
-| `LINUXDO_COOKIE_TTL` | 缓存有效期秒数,默认 `2592000`(30 天,配合自续期) |
+| `LINUXDO_COOKIE` | 兜底:手工指定 `_t=xxx`(裸 token 也可) |
+| `LINUXDO_BROWSER` | 读 `cf_clearance` 的日常浏览器:`chrome`(默认)/`chromium`/`brave` |
+| `LINUXDO_UA` | 覆盖按浏览器版本自动拼出的 User-Agent |
+| `LINUXDO_CHROME` | 专用浏览器的可执行文件路径(默认自动探测 Chrome/Chromium/Edge/Brave) |
+| `LINUXDO_CF_TIMEOUT` | 等待过盾的秒数,默认 `180` |
 | `LINUXDO_CACHE_DIR` | 缓存目录,默认 `~/.cache/linuxdo-mcp` |
 | `LINUXDO_IMPERSONATE` | TLS 指纹,默认 `chrome` |
 
-> ⚠️ `_t` 等于你的 linux.do 登录凭证,只填进自己的本地配置,**切勿分享给他人**。
+> ⚠️ `session.json` 里的 `_t` 等于你的 linux.do 登录凭证,**切勿分享给他人**。
 
 
 ## 本地运行(开发)
 
 ```bash
-uvx --from . linuxdo-mcp        # 或 uv run src/linuxdo_mcp/server.py
+uvx --from . linuxdo-mcp        # 或 uv run linuxdo-mcp
+uv run pytest                   # 单元测试(不访问网络)
 ```
 
 ## 备注
 
-- cookie 过期返回 401/403 时会清缓存并提示更新;按你选的方式重配一次即可(方式二一般不会到期,浏览器保持登录时会自动续期)。
-- 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只读取 linux.do 一个域名下的 cookie。
-- 偶发被 Cloudflare 拦截时会自动重试 3 次;仍失败可设 `LINUXDO_IMPERSONATE=chrome131`(或 `chrome124`)换指纹。
-- 所有请求为只读 GET,不做任何写操作。
+- 读取浏览器 cookie 依赖 [pycookiecheat](https://github.com/n8henrie/pycookiecheat),只取 linux.do 的 `cf_clearance`。
+- 被 Cloudflare 拦截时会自动刷新 clearance 后重试一次;仍失败可设 `LINUXDO_IMPERSONATE=chrome146` 换指纹。
+- 读取类工具全部是 GET;写操作只发生在登录时(换会话、撤销临时 key)。

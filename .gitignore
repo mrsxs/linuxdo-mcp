@@ -6,3 +6,10 @@ dist/
 build/
 *.egg-info/
 .env
+.claude/
+*.db
+.idea/
+.vscode/
+*.tar.gz
+*.zip
+.pytest_cache/

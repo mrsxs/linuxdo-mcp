@@ -1,70 +1,55 @@
 """linux.do (Discourse) MCP 服务器。
 
-通过 curl_cffi 模拟 Chrome TLS 指纹绕过 Cloudflare，用 _t cookie 认证。
-认证：默认自动从本机浏览器读取 linux.do 的 _t cookie（见 cookies.py），
-也可用环境变量 LINUXDO_COOKIE = "_t=你的token值" 显式指定。
-
-暴露工具：whoami / search / get_topic。
+过盾：专用浏览器铸出 cf_clearance，curl_cffi 带着它和同一 UA 访问（见 cf.py）。
+认证：login 工具走 linux.do 授权页换一个 MCP 独立的 _t 会话（见 auth.py），
+也可用环境变量 LINUXDO_COOKIE = "_t=你的token值" 手工指定。未登录时按匿名访问公开内容。
 """
 import html
 import json
-import os
 import re
+import subprocess
+import sys
 import time
 import urllib.parse
 
-from curl_cffi import requests as creq
+import anyio
 
 try:  # mcp >= 2：FastMCP 更名为 MCPServer
     from mcp.server.mcpserver import MCPServer as _Server
 except ImportError:  # mcp < 2
     from mcp.server.fastmcp import FastMCP as _Server
 
-from . import cookies
+from . import auth, client, handler, session
 
-BASE = "https://linux.do"
-IMPERSONATE = os.environ.get("LINUXDO_IMPERSONATE", "chrome")
+BASE = client.BASE
 
 mcp = _Server("linuxdo")
 
 
-def _cookie_header():
-    return cookies.get_cookie()
-
-
-def _blocked(body):
-    return "Just a moment" in body[:600] or "challenge-platform" in body[:2000]
+def _errors(body):
+    try:
+        errs = json.loads(body).get("errors")
+    except (ValueError, AttributeError):
+        return ""
+    return "；".join(errs) if isinstance(errs, list) else ""
 
 
 def _fetch(path):
-    url = path if path.startswith("http") else BASE + path
-    headers = {"Accept": "application/json", "Cookie": _cookie_header()}
-    last = ""
-    for attempt in range(3):
-        try:
-            r = creq.get(url, headers=headers, impersonate=IMPERSONATE, timeout=30)
-        except Exception as e:
-            last = f"请求失败：{e}"
-            time.sleep(0.8 * (attempt + 1))
-            continue
-        body = r.text
-        if _blocked(body):
-            last = "被 Cloudflare 拦截"
-            time.sleep(0.8 * (attempt + 1))
-            continue
-        if r.status_code in (401, 403):
-            cookies.clear_cache()  # 失效即清缓存，下次用 env 重新 bootstrap；不重读浏览器
-            raise RuntimeError(
-                f"认证失败({r.status_code})：cookie 已失效，"
-                "请更新 LINUXDO_COOKIE（独立 _t）后重试。"
-            )
-        if r.status_code == 429:
-            raise RuntimeError("被限流(429)：请降低频率，稍后重试。")
-        if r.status_code != 200 or not body.lstrip().startswith(("{", "[")):
-            raise RuntimeError(f"异常响应 HTTP {r.status_code}: {body[:200]}")
-        cookies.absorb_rotation(r)  # 接收轮换后的新 _t，自续期
-        return json.loads(body)
-    raise RuntimeError(f"{last}（已重试 3 次）。可设 LINUXDO_IMPERSONATE=chrome131 换指纹。")
+    r = client.request("GET", path)
+    body = r.text
+    if r.headers.get("discourse-logged-out") and session.get_cookie():
+        session.clear()  # 服务端判定 _t 已失效
+        raise RuntimeError("登录会话已失效：请调用 login 工具重新授权登录。")
+    if r.status_code in (401, 403):
+        hint = "（当前未登录，可调用 login 授权登录后再试）" if not session.get_cookie() else ""
+        raise RuntimeError(f"无权访问(HTTP {r.status_code})：{_errors(body) or '受信任等级或权限限制'}{hint}")
+    if r.status_code == 404:
+        raise RuntimeError(f"不存在(404)：{_errors(body) or path}")
+    if r.status_code == 429:
+        raise RuntimeError("被限流(429)：请降低频率，稍后重试。")
+    if r.status_code != 200 or not body.lstrip().startswith(("{", "[")):
+        raise RuntimeError(f"异常响应 HTTP {r.status_code}: {body[:200]}")
+    return json.loads(body)
 
 
 def _strip_html(s):
@@ -141,9 +126,17 @@ def _as_topic_id(topic):
 
 
 def _whoami():
-    u = _fetch("/session/current.json").get("current_user") or {}
+    if not session.get_cookie():
+        raise RuntimeError("未登录：请调用 login 工具（或命令行 `linuxdo-mcp login`）授权登录。")
+    try:
+        u = _fetch("/session/current.json").get("current_user") or {}
+    except RuntimeError as e:
+        if "404" not in str(e):  # Discourse 对未登录的 current.json 回 404
+            raise
+        u = {}
     if not u:
-        raise RuntimeError("未登录（cookie 无效或为空）。")
+        raise RuntimeError("未登录（会话无效）：请调用 login 工具重新授权登录。")
+    session.set_username(u.get("username"))
     return {k: u.get(k) for k in ("username", "name", "trust_level", "admin", "moderator")}
 
 
@@ -388,9 +381,45 @@ def _format_topic(topic_id, posts, start):
     return "\n".join(out).rstrip()
 
 
+def _logout():
+    session.clear()
+    return {"logged_out": True}
+
+
+def _cli_login():
+    where = "默认浏览器" if handler.installed() else "专用浏览器窗口"
+    print(f"正在{where}打开 linux.do 授权页：需要时先过验证，然后点「授权」…", file=sys.stderr)
+    auth.login()
+    return _whoami()
+
+
+LOGIN_TIMEOUT_RANGE = (30, 600)
+
+
+@mcp.tool()
+async def login(timeout_seconds: int = auth.DEFAULT_TIMEOUT) -> dict:
+    """授权登录 linux.do。装了回调小程序（命令行 `linuxdo-mcp install-handler`）时，
+    会在你的默认浏览器打开 linux.do 授权页：点「授权」并允许打开 linuxdo-mcp-auth 即可；
+    若弹出专用浏览器窗口显示「请验证您是真人」，点一下过 Cloudflare 验证。
+    没装小程序则在专用浏览器里授权（需要在其中登录 linux.do）。
+    换到的是本工具独立的登录会话，不影响你日常浏览器的登录。成功后返回当前用户。
+    timeout_seconds 为等待你完成操作的最长秒数（30–600）。"""
+    lo, hi = LOGIN_TIMEOUT_RANGE
+    # 要等用户在浏览器里操作几分钟，放到线程里跑，别卡住 MCP 的事件循环
+    await anyio.to_thread.run_sync(auth.login, min(max(timeout_seconds, lo), hi))
+    return await anyio.to_thread.run_sync(_whoami)
+
+
+@mcp.tool()
+def logout() -> dict:
+    """清除本工具保存的登录会话（之后按匿名访问；服务端会话可在 linux.do
+    偏好设置→安全→最近使用的设备 里注销）。"""
+    return _logout()
+
+
 @mcp.tool()
 def whoami() -> dict:
-    """查看当前 cookie 对应的 linux.do 登录用户与信任等级。"""
+    """查看本工具当前登录的 linux.do 用户与信任等级；未登录时提示调用 login。"""
     return _whoami()
 
 
@@ -487,7 +516,22 @@ def user_actions(username: str, limit: int = 20) -> dict:
 
 
 def main():
-    mcp.run()
+    """无参数时作为 MCP 服务器运行；`linuxdo-mcp login|logout|whoami` 供命令行直接使用。"""
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not cmd:
+        mcp.run()
+        return
+    actions = {"login": _cli_login, "logout": _logout, "whoami": _whoami,
+               "install-handler": handler.install, "uninstall-handler": handler.uninstall}
+    if cmd not in actions:
+        sys.exit(f"用法：linuxdo-mcp [{'|'.join(actions)}]（不带参数则作为 MCP 服务器运行）")
+    try:
+        print(json.dumps(actions[cmd](), ensure_ascii=False, indent=2))
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or b"").decode(errors="replace").strip()
+        sys.exit(f"失败：{' '.join(map(str, e.cmd))} 返回 {e.returncode}{'：' + detail if detail else ''}")
+    except (RuntimeError, OSError, ValueError) as e:
+        sys.exit(f"失败：{e}")
 
 
 if __name__ == "__main__":
